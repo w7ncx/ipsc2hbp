@@ -24,6 +24,18 @@ ipsc_master_id = 9999999
 # Also used as the HBP repeater ID by default — see hbp_repeater_id below.
 ipsc_peer_id = 3120000
 
+# Role: "MASTER" (default) or "PEER".  When set to "PEER", this instance
+# acts as an IPSC peer and will connect to a remote IPSC master specified
+# by `remote_ip`/`remote_port` below.
+role = "MASTER"
+
+# When running in PEER role, the remote IPSC master address to register with.
+# Example:
+# remote_ip = "192.168.1.200"
+# remote_port = 50000
+remote_ip = ""
+remote_port = 0
+
 # Optional: restrict registration to a specific source IP address.
 # If set, any MASTER_REG_REQ from a different IP is silently dropped (WARNING logged).
 # Leave empty ("") to accept registrations from any IP.

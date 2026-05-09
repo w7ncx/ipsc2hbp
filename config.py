@@ -17,12 +17,15 @@ class Config:
     # [ipsc]
     ipsc_bind_ip: str
     ipsc_bind_port: int
+    ipsc_role: str         # MASTER or PEER
     ipsc_master_id: int
     ipsc_peer_id: int      # 0 = accept any peer radio ID (wildcard)
     allowed_peer_ip: str   # if non-empty, only this source IP may register
     auth_enabled: bool
     auth_key: bytes        # 20 bytes, zero-padded from hex config value
     keepalive_watchdog: int
+    ipsc_remote_ip: str    # required if role=PEER; ignored in MASTER role
+    ipsc_remote_port: int  # required if role=PEER; ignored in MASTER role
 
     # [hbp]
     hbp_master_ip: str
@@ -109,6 +112,7 @@ def load(path: str) -> Config:
     # [ipsc]
     ipsc_bind_ip        = get_str('ipsc', 'bind_ip')
     ipsc_bind_port      = get_int('ipsc', 'bind_port', min_val=1, max_val=65535)
+    ipsc_role           = get_str('ipsc', 'role', required=False, default='MASTER', choices={'MASTER','PEER'})
     ipsc_master_id      = get_int('ipsc', 'ipsc_master_id', min_val=1)
     ipsc_peer_id        = get_int('ipsc', 'ipsc_peer_id', required=False, default=0)
     allowed_peer_ip     = get_str('ipsc', 'allowed_peer_ip', required=False, default='')
@@ -138,6 +142,10 @@ def load(path: str) -> Config:
     hbp_mode        = get_str('hbp', 'hbp_mode', choices=_VALID_HBP_MODES)
     hbp_repeater_id = get_int('hbp', 'hbp_repeater_id', required=False, default=0)
 
+    # When running in PEER role, we need the remote IPSC master address to talk to.
+    ipsc_remote_ip   = get_str('ipsc', 'remote_ip', required=False, default='')
+    ipsc_remote_port = get_int('ipsc', 'remote_port', required=False, default=0)
+
     raw_passphrase = get_str('hbp', 'passphrase')
     hbp_passphrase = raw_passphrase.encode()
 
@@ -160,6 +168,20 @@ def load(path: str) -> Config:
     if errors:
         raise ValueError('Configuration errors:\n' + '\n'.join(f'  {e}' for e in errors))
 
+    # Additional validation that depends on previously-parsed values
+    if ipsc_role == 'PEER':
+        if not ipsc_remote_ip:
+            errors.append('[ipsc] remote_ip: required when role=PEER')
+        else:
+            try:
+                socket.inet_aton(ipsc_remote_ip)
+            except OSError:
+                errors.append(f'[ipsc] remote_ip: not a valid IPv4 address: {ipsc_remote_ip!r}')
+        if not (1 <= ipsc_remote_port <= 65535):
+            errors.append('[ipsc] remote_port: required and must be 1..65535 when role=PEER')
+        if ipsc_peer_id == 0:
+            errors.append('[ipsc] ipsc_peer_id: must be non-zero when running in PEER role')
+
     # Resolve hbp_repeater_id — falls back to ipsc_peer_id when not explicitly set
     resolved_repeater_id = hbp_repeater_id if hbp_repeater_id else ipsc_peer_id
 
@@ -169,16 +191,22 @@ def load(path: str) -> Config:
             'HBP requires a radio ID to connect with'
         )
 
+    if errors:
+        raise ValueError('Configuration errors:\n' + '\n'.join(f'  {e}' for e in errors))
+
     return Config(
         log_level=log_level,
         ipsc_bind_ip=ipsc_bind_ip,
         ipsc_bind_port=ipsc_bind_port,
+        ipsc_role=ipsc_role,
         ipsc_master_id=ipsc_master_id,
         ipsc_peer_id=ipsc_peer_id,
         allowed_peer_ip=allowed_peer_ip,
         auth_enabled=auth_enabled,
         auth_key=auth_key,
         keepalive_watchdog=keepalive_watchdog,
+        ipsc_remote_ip=ipsc_remote_ip,
+        ipsc_remote_port=ipsc_remote_port,
         hbp_master_ip=hbp_master_ip,
         hbp_master_port=hbp_master_port,
         hbp_repeater_id=resolved_repeater_id,

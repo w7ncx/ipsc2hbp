@@ -339,3 +339,158 @@ class IPSCProtocol(asyncio.DatagramProtocol):
 
     def is_peer_registered(self) -> bool:
         return self._registered
+
+
+class IPSCPeerProtocol(asyncio.DatagramProtocol):
+    """Basic IPSC peer implementation: registers with a remote master and
+    forwards GROUP_VOICE packets to the translator.  Intended as a minimal
+    peer-mode counterpart for the existing master implementation.
+    """
+
+    def __init__(self, config: Config, translator):
+        self._cfg = config
+        self._translator = translator
+        self._transport = None
+        self._keepalive_task = None
+
+        self._registered = False
+        self._master_id = b'\x00\x00\x00\x00'
+        self._master_ip = config.ipsc_remote_ip
+        self._master_port = config.ipsc_remote_port
+        self._last_ka = 0.0
+
+        # Our repeater radio ID (peer ID) — required when running in PEER role
+        self._peer_id = config.ipsc_peer_id.to_bytes(4, 'big')
+
+        # Build a canonical MASTER_REG_REQ packet to send repeatedly until accepted.
+        flags_byte4 = VOICE_CALL_MSK
+        if config.auth_enabled:
+            flags_byte4 |= PKT_AUTH_MSK
+        our_flags = b'\x00\x00\x00' + bytes([flags_byte4])
+        self._reg_req = bytes([MASTER_REG_REQ]) + self._peer_id + _OUR_MODE + our_flags
+
+    def connection_made(self, transport):
+        self._transport = transport
+        log.info('IPSC peer bound local %s:%d — remote master %s:%d',
+                 self._cfg.ipsc_bind_ip, self._cfg.ipsc_bind_port,
+                 self._master_ip, self._master_port)
+        self._keepalive_task = asyncio.get_running_loop().create_task(self._keepalive_loop())
+
+    def connection_lost(self, exc):
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
+
+    def error_received(self, exc):
+        log.warning('IPSC socket error: %s', exc)
+
+    def datagram_received(self, data: bytes, addr):
+        host, port = addr[0], addr[1]
+
+        if self._cfg.auth_enabled:
+            if not self._check_auth(data):
+                log.warning('IPSC auth failure from %s:%d — packet dropped', host, port)
+                return
+            data = data[:-AUTH_DIGEST_LEN]
+
+        if not data:
+            return
+
+        _wire.debug('IPSC(REP) RECV %d %s', len(data), data.hex())
+        opcode = data[0]
+
+        if opcode == GROUP_VOICE:
+            # Treat incoming GROUP_VOICE frames from master like the master does
+            self._on_group_voice(data, host, port)
+            return
+
+        if opcode == MASTER_REG_REPLY:
+            # Registration accepted by master
+            if len(data) >= 5:
+                self._master_id = data[1:5]
+            self._registered = True
+            self._master_ip = host
+            self._master_port = port
+            self._last_ka = time()
+            log.info('Registered with IPSC master id=%d %s:%d', int.from_bytes(self._master_id, 'big'), host, port)
+            # Notify translator that we're 'registered' so HBP can be activated
+            self._translator.peer_registered(self._master_id, host, port)
+            return
+
+        if opcode == MASTER_ALIVE_REPLY:
+            # Master keepalive reply; update last seen
+            self._last_ka = time()
+            log.debug('MASTER_ALIVE_REPLY from %s:%d', host, port)
+            return
+
+        # Log other packets at debug or handle known unhandled opcodes
+        if opcode in _KNOWN_UNHANDLED:
+            log.debug('%s (0x%02x) from %s:%d — received, not handled', _KNOWN_UNHANDLED[opcode], opcode, host, port)
+            return
+
+        log.debug('IPSC peer received opcode 0x%02x from %s:%d', opcode, host, port)
+
+    def _on_group_voice(self, data: bytes, host: str, port: int):
+        # Only accept voice when registered with configured master
+        if not self._registered:
+            return
+        if len(data) < GV_MIN_LEN:
+            log.warning('GROUP_VOICE too short (%d bytes) from %s:%d', len(data), host, port)
+            return
+
+        burst_type = data[GV_BURST_TYPE_OFF]
+        call_info = data[GV_CALL_INFO_OFF]
+        log.debug('GROUP_VOICE len=%d burst=0x%02x raw[0:32]=%s from %s:%d',
+                  len(data), burst_type, data[:32].hex(), host, port)
+
+        if burst_type in (VOICE_HEAD, VOICE_TERM):
+            ts = 2 if (call_info & TS_CALL_MSK) else 1
+        else:
+            ts = 2 if (burst_type & 0x80) else 1
+
+        self._translator.ipsc_voice_received(data, ts, burst_type)
+
+    def _check_auth(self, data: bytes) -> bool:
+        if len(data) <= AUTH_DIGEST_LEN:
+            return False
+        payload = data[:-AUTH_DIGEST_LEN]
+        received = data[-AUTH_DIGEST_LEN:]
+        expected = hmac_mod.new(self._cfg.auth_key, payload, sha1).digest()[:10]
+        return received == expected
+
+    def _auth_suffix(self, packet: bytes) -> bytes:
+        if not self._cfg.auth_enabled:
+            return b''
+        return hmac_mod.new(self._cfg.auth_key, packet, sha1).digest()[:10]
+
+    def _send(self, packet: bytes, host: str, port: int):
+        out = packet + self._auth_suffix(packet)
+        _wire.debug('IPSC(REP) SEND %d %s', len(packet), packet.hex())
+        if self._transport:
+            self._transport.sendto(out, (host, port))
+
+    async def _keepalive_loop(self):
+        # Retry registration until accepted, then periodically send keepalives.
+        retry_interval = 5
+        ka_interval = max(5, int(self._cfg.keepalive_watchdog // 3))
+        while True:
+            try:
+                if not self._registered:
+                    # Send registration request to remote master
+                    self._send(self._reg_req, self._master_ip, self._master_port)
+                    await asyncio.sleep(retry_interval)
+                    continue
+                # Send keepalive
+                alive = bytes([MASTER_ALIVE_REQ]) + self._peer_id
+                self._send(alive, self._master_ip, self._master_port)
+                await asyncio.sleep(ka_interval)
+            except asyncio.CancelledError:
+                break
+
+    # Public interface used by translator
+    def send_to_peer(self, packet: bytes):
+        """Send GROUP_VOICE to the configured master when registered."""
+        if self._registered and self._transport:
+            self._send(packet, self._master_ip, self._master_port)
+
+    def is_peer_registered(self) -> bool:
+        return self._registered

@@ -61,16 +61,19 @@ def main():
         _setup_logging(log_level)
 
     log = logging.getLogger('ipsc2hbp')
-    log.info('ipsc2hbp starting — IPSC master_id=%d  peer_id=%d  HBP %s:%d  mode=%s',
-             cfg.ipsc_master_id, cfg.ipsc_peer_id,
+    log.info('ipsc2hbp starting — role=%s IPSC master_id=%d  peer_id=%d  HBP %s:%d  mode=%s',
+             cfg.ipsc_role, cfg.ipsc_master_id, cfg.ipsc_peer_id,
              cfg.hbp_master_ip, cfg.hbp_master_port, cfg.hbp_mode)
 
-    from ipsc.protocol import IPSCProtocol
+    from ipsc.protocol import IPSCProtocol, IPSCPeerProtocol
     from hbp.protocol import HBPClient
     from translate.translator import CallTranslator
 
     translator = CallTranslator(cfg)
-    ipsc_proto = IPSCProtocol(cfg, translator)
+    if cfg.ipsc_role == 'MASTER':
+        ipsc_proto = IPSCProtocol(cfg, translator)
+    else:
+        ipsc_proto = IPSCPeerProtocol(cfg, translator)
     hbp_client = HBPClient(cfg, translator)
     translator.set_protocols(ipsc_proto, hbp_client)
 
