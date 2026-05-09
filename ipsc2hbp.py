@@ -67,6 +67,7 @@ def main():
 
     from ipsc.protocol import IPSCProtocol, IPSCPeerProtocol
     from hbp.protocol import HBPClient
+    from hbp.server import HBPServer
     from translate.translator import CallTranslator
 
     translator = CallTranslator(cfg)
@@ -74,7 +75,10 @@ def main():
         ipsc_proto = IPSCProtocol(cfg, translator)
     else:
         ipsc_proto = IPSCPeerProtocol(cfg, translator)
-    hbp_client = HBPClient(cfg, translator)
+    if cfg.hbp_role == 'MASTER':
+        hbp_client = HBPServer(cfg, translator)
+    else:
+        hbp_client = HBPClient(cfg, translator)
     translator.set_protocols(ipsc_proto, hbp_client)
 
     loop = asyncio.new_event_loop()

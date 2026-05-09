@@ -7,6 +7,7 @@ log = logging.getLogger(__name__)
 
 _VALID_LOG_LEVELS = {'DEBUG', 'INFO', 'WARNING', 'ERROR'}
 _VALID_HBP_MODES  = {'TRACKING', 'PERSISTENT'}
+_VALID_HBP_ROLES  = {'MASTER', 'PEER'}
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class Config:
 
     # [hbp]
     hbp_master_ip: str
+    hbp_role: str         # MASTER or PEER
     hbp_master_port: int
     hbp_repeater_id: int   # resolved: defaults to ipsc_peer_id when 0; always non-zero
     hbp_passphrase: bytes
@@ -140,6 +142,7 @@ def load(path: str) -> Config:
     hbp_master_ip   = get_str('hbp', 'master_ip')
     hbp_master_port = get_int('hbp', 'master_port', min_val=1, max_val=65535)
     hbp_mode        = get_str('hbp', 'hbp_mode', choices=_VALID_HBP_MODES)
+    hbp_role        = get_str('hbp', 'role', required=False, default='PEER', choices=_VALID_HBP_ROLES)
     hbp_repeater_id = get_int('hbp', 'hbp_repeater_id', required=False, default=0)
 
     # When running in PEER role, we need the remote IPSC master address to talk to.
@@ -148,6 +151,13 @@ def load(path: str) -> Config:
 
     raw_passphrase = get_str('hbp', 'passphrase')
     hbp_passphrase = raw_passphrase.encode()
+
+    # Validate HBP master/bind IP
+    if hbp_master_ip:
+        try:
+            socket.inet_aton(hbp_master_ip)
+        except OSError:
+            errors.append(f'[hbp] master_ip: not a valid IPv4 address: {hbp_master_ip!r}')
 
     # RPTC fields (all optional with sensible defaults)
     options     = get_str('hbp', 'options',     required=False, default='')
@@ -208,6 +218,7 @@ def load(path: str) -> Config:
         ipsc_remote_ip=ipsc_remote_ip,
         ipsc_remote_port=ipsc_remote_port,
         hbp_master_ip=hbp_master_ip,
+        hbp_role=hbp_role,
         hbp_master_port=hbp_master_port,
         hbp_repeater_id=resolved_repeater_id,
         hbp_passphrase=hbp_passphrase,
